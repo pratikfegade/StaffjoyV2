@@ -17,8 +17,11 @@ import (
 	pb "v2.staffjoy.com/account"
 	"v2.staffjoy.com/environments"
 	"v2.staffjoy.com/sms"
+	tracing "v2.staffjoy.com/tracing"
 
 	"v2.staffjoy.com/healthcheck"
+
+	otgrpc "github.com/opentracing-contrib/go-grpc"
 )
 
 const (
@@ -50,6 +53,12 @@ func main() {
 		s.errorClient = environments.ErrorClient(&config)
 	}
 
+	s.use_caching = (os.Getenv("USE_CACHING") == "1")
+
+	if s.use_caching {
+		logger.Info("Using caching")
+	}
+
 	smsConn, err := grpc.Dial(sms.Endpoint, grpc.WithInsecure())
 	if err != nil {
 		logger.Fatalf("did not connect: %v", err)
@@ -57,14 +66,17 @@ func main() {
 	defer smsConn.Close()
 	s.smsClient = sms.NewSmsServiceClient(smsConn)
 
-	s.db, err = sql.Open("mysql", os.Getenv("MYSQL_CONFIG")+"?parseTime=true")
+	// s.db, err = sql.Open("mysql", os.Getenv("MYSQL_CONFIG")+"?parseTime=true")
+	s.db, err = sql.Open("mysql", "staffjoy:password@tcp(127.0.0.1:3306)/staffjoy?parseTime=true")
 	if err != nil {
 		logger.Panicf("Cannot connect to account db - %v", err)
 	}
 	defer s.db.Close()
 
 	s.dbMap = &gorp.DbMap{Db: s.db, Dialect: gorp.MySQLDialect{Engine: "InnoDB", Encoding: "UTF8"}}
+	// s.dbMap = &gorp.DbMap{Db: s.db, Dialect: gorp.MySQLDialect{Engine: "MEMORY", Encoding: "UTF8"}}
 	_ = s.dbMap.AddTableWithName(pb.Account{}, "account").SetKeys(false, "uuid")
+	s.dbMap.CreateTablesIfNotExists()
 	if config.Debug {
 		s.dbMap.TraceOn("[gorp]", logger)
 	}
@@ -75,8 +87,14 @@ func main() {
 		logger.Panicf("failed to listen: %v", err)
 	}
 
-	var opts []grpc.ServerOption
-	grpcServer := grpc.NewServer(opts...)
+
+	tracer, closer := tracing.InitTracer(ServiceName)
+	defer closer.Close()
+
+	grpcServer := grpc.NewServer(grpc.UnaryInterceptor(
+		otgrpc.OpenTracingServerInterceptor(tracer)),
+		grpc.StreamInterceptor(
+			otgrpc.OpenTracingStreamServerInterceptor(tracer)))
 	pb.RegisterAccountServiceServer(grpcServer, s)
 
 	// set up a health check listener for kubernetes

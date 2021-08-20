@@ -4,44 +4,58 @@ package staffjoy.bot;
 option go_package = "v2.staffjoy.com/bot";
 
 import "google/protobuf/empty.proto";
+import "google/protobuf/timestamp.proto";
 import "company.proto";
 
 message OnboardWorkerRequest {
-    string company_uuid = 1;
-    string user_uuid = 2;
+  string company_uuid = 1;
+  string user_uuid = 2;
+}
+
+message AlertNewShiftOptimizedRequest {
+  string user_name = 1;
+  string user_ph_num = 2;
+  string user_email = 3;
+  string job_name = 4;
+  string team_timezone = 5;
+  google.protobuf.Timestamp shift_start = 6;
+  google.protobuf.Timestamp shift_stop = 7;
+  string company_name = 8;
 }
 
 message AlertNewShiftRequest {
-    string user_uuid = 1;
-    staffjoy.company.Shift new_shift = 2;
+  string user_uuid = 1;
+  staffjoy.company.Shift new_shift = 2;
 }
 
 message AlertNewShiftsRequest {
-    string user_uuid = 1;
-    repeated staffjoy.company.Shift new_shifts = 2;
+  string user_uuid = 1;
+  repeated staffjoy.company.Shift new_shifts = 2;
 }
 
 message AlertRemovedShiftRequest {
-    string user_uuid = 1;
-    staffjoy.company.Shift old_shift = 2;
+  string user_uuid = 1;
+  staffjoy.company.Shift old_shift = 2;
 }
 
 message AlertRemovedShiftsRequest {
-    string user_uuid = 1;
-    repeated staffjoy.company.Shift old_shifts = 2;
+  string user_uuid = 1;
+  repeated staffjoy.company.Shift old_shifts = 2;
 }
 
 
 message AlertChangedShiftRequest {
-    string user_uuid = 1;
-    staffjoy.company.Shift old_shift = 2;
-    staffjoy.company.Shift new_shift = 3;
+  string user_uuid = 1;
+  staffjoy.company.Shift old_shift = 2;
+  staffjoy.company.Shift new_shift = 3;
 }
 
 service BotService {
   rpc OnboardWorker(OnboardWorkerRequest) returns (google.protobuf.Empty){}
 
   rpc AlertNewShift(AlertNewShiftRequest) returns (google.protobuf.Empty){}
+
+  rpc AlertNewShiftOptimized(AlertNewShiftOptimizedRequest) returns (google.protobuf.Empty){}
 
   rpc AlertNewShifts(AlertNewShiftsRequest) returns (google.protobuf.Empty){}
 

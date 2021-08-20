@@ -19,9 +19,9 @@ const (
 	supportKey    = "support"
 	expirationKey = "exp"
 	// for GRPC
-	currentUserMetadata = "faraday-current-user-uuid"
+	CurrentUserMetadata = "faraday-current-user-uuid"
 	// header set for internal user id
-	currentUserHeader = "Grpc-Metadata-Faraday-Current-User-Uuid"
+	CurrentUserHeader = "Grpc-Metadata-Faraday-Current-User-Uuid"
 
 	// AuthorizationHeader is the http request header
 	// key used for accessing the internal authorization.
@@ -104,7 +104,7 @@ func SetInternalHeaders(externalReq *http.Request, internalHeaders http.Header) 
 		} else {
 			authorization = AuthorizationAuthenticatedUser
 		}
-		internalHeaders.Set(currentUserHeader, uuid)
+		internalHeaders.Set(CurrentUserHeader, uuid)
 	}
 	internalHeaders.Set(AuthorizationHeader, authorization)
 	return
@@ -128,7 +128,7 @@ func ProxyHeaders(from, to http.Header) {
 // authorization methods of AuthenticatedUser or SupportUser to access
 // the uuid of the user making the request
 func GetCurrentUserUUIDFromMetadata(data metadata.MD) (uuid string, err error) {
-	res, ok := data[currentUserMetadata]
+	res, ok := data[CurrentUserMetadata]
 	if !ok || len(res) == 0 {
 		err = fmt.Errorf("User not authenticated")
 		return
@@ -141,7 +141,7 @@ func GetCurrentUserUUIDFromMetadata(data metadata.MD) (uuid string, err error) {
 // authorization methods of AuthenticatedUser or SupportUser to access
 // the uuid of the user making the request
 func GetCurrentUserUUIDFromHeader(data http.Header) (uuid string, err error) {
-	res, ok := data[currentUserHeader]
+	res, ok := data[CurrentUserHeader]
 	if !ok || len(res) == 0 {
 		err = fmt.Errorf("User not authenticated")
 		return

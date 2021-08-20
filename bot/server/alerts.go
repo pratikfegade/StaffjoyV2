@@ -20,9 +20,9 @@ func (s *botServer) AlertNewShift(ctx context.Context, req *bot.AlertNewShiftReq
 	companyUUID := req.NewShift.CompanyUuid
 	teamUUID := req.NewShift.TeamUuid
 
-	botCtx := botContext()
+	botCtx := botContext2(ctx)
 
-	accountClient, close, err := account.NewClient()
+	accountClient, close, err := account.NewClient(ServiceName)
 	if err != nil {
 		return nil, s.internalError(err, "unable to initiate account connection")
 	}
@@ -33,7 +33,7 @@ func (s *botServer) AlertNewShift(ctx context.Context, req *bot.AlertNewShiftReq
 		return nil, s.internalError(err, "cannot find user")
 	}
 
-	companyClient, close, err := company.NewClient()
+	companyClient, close, err := company.NewClient(ServiceName)
 	if err != nil {
 		return nil, s.internalError(err, "unable to initiate company connection")
 	}
@@ -69,13 +69,61 @@ func (s *botServer) AlertNewShift(ctx context.Context, req *bot.AlertNewShiftReq
 
 	msg := fmt.Sprintf("%s Your %s manager just published a new%s shift for you: \n%s", u.Greet(), c.Name, jobName, newShift)
 
-	smsClient, close, err := sms.NewClient()
+	smsClient, close, err := sms.NewClient(ServiceName)
 	if err != nil {
 		return nil, s.internalError(err, "unable to initiate sms connection")
 	}
 	defer close()
 
 	if _, err := smsClient.QueueSend(ctx, &sms.SmsRequest{To: a.Phonenumber, Body: msg}); err != nil {
+		s.internalError(err, "could not send welcome sms")
+	}
+	return &empty.Empty{}, nil
+}
+
+func (s *botServer) AlertNewShiftOptimized(ctx context.Context, req *bot.AlertNewShiftOptimizedRequest) (*empty.Empty, error) {
+	// timeStart := time.Now()
+	// defer func() {
+		// s.logger.Infof("Exe time: %d", time.Since(timeStart).Microseconds())
+	// }()
+
+	newShift, err := printShiftSmsOptimized(req.ShiftStart, req.ShiftStop, req.TeamTimezone)
+	if err != nil {
+		return nil, s.internalError(err, "cannot format start of shift")
+	}
+
+	jobName := req.JobName
+	// Format name with leading space.
+	if jobName != "" {
+		jobName = fmt.Sprintf(" %s", jobName)
+	}
+
+	preferred_dispatch := func() dispatch {
+		// todo - check user notification preferences
+		switch {
+		case req.UserPhNum != "":
+			return dispatchSms
+		case req.UserEmail != "":
+			return dispatchEmail
+		default:
+			return dispatchUnavailable
+		}
+	}()
+
+	if preferred_dispatch != dispatchSms {
+		return &empty.Empty{}, nil
+	}
+
+	msg := fmt.Sprintf("%s Your %s manager just published a new%s shift for you: \n%s", GreetWithName(req.UserName),
+		req.CompanyName, jobName, newShift)
+
+	smsClient, close, err := sms.NewClient(ServiceName)
+	if err != nil {
+		return nil, s.internalError(err, "unable to initiate sms connection")
+	}
+	defer close()
+
+	if _, err := smsClient.QueueSend(ctx, &sms.SmsRequest{To: req.UserPhNum, Body: msg}); err != nil {
 		s.internalError(err, "could not send welcome sms")
 	}
 	return &empty.Empty{}, nil
@@ -92,7 +140,7 @@ func (s *botServer) AlertNewShifts(ctx context.Context, req *bot.AlertNewShiftsR
 
 	botCtx := botContext()
 
-	accountClient, close, err := account.NewClient()
+	accountClient, close, err := account.NewClient(ServiceName)
 	if err != nil {
 		return nil, s.internalError(err, "unable to initiate account connection")
 	}
@@ -103,7 +151,7 @@ func (s *botServer) AlertNewShifts(ctx context.Context, req *bot.AlertNewShiftsR
 		return nil, s.internalError(err, "cannot find user")
 	}
 
-	companyClient, close, err := company.NewClient()
+	companyClient, close, err := company.NewClient(ServiceName)
 	if err != nil {
 		return nil, s.internalError(err, "unable to initiate company connection")
 	}
@@ -144,7 +192,7 @@ func (s *botServer) AlertNewShifts(ctx context.Context, req *bot.AlertNewShiftsR
 
 	msg := fmt.Sprintf("%s Your %s manager just published %d new shifts that you are working: \n%s", u.Greet(), c.Name, len(shifts), newShifts)
 
-	smsClient, close, err := sms.NewClient()
+	smsClient, close, err := sms.NewClient(ServiceName)
 	if err != nil {
 		return nil, s.internalError(err, "unable to initiate sms connection")
 	}
@@ -162,7 +210,7 @@ func (s *botServer) AlertRemovedShift(ctx context.Context, req *bot.AlertRemoved
 
 	botCtx := botContext()
 
-	accountClient, close, err := account.NewClient()
+	accountClient, close, err := account.NewClient(ServiceName)
 	if err != nil {
 		return nil, s.internalError(err, "unable to initiate account connection")
 	}
@@ -172,7 +220,7 @@ func (s *botServer) AlertRemovedShift(ctx context.Context, req *bot.AlertRemoved
 	if err != nil {
 		return nil, s.internalError(err, "cannot find user")
 	}
-	companyClient, close, err := company.NewClient()
+	companyClient, close, err := company.NewClient(ServiceName)
 	if err != nil {
 		return nil, s.internalError(err, "unable to initiate company connection")
 	}
@@ -210,7 +258,7 @@ func (s *botServer) AlertRemovedShift(ctx context.Context, req *bot.AlertRemoved
 
 	logger.Infof("msg sent to user was: %v", msg)
 
-	smsClient, close, err := sms.NewClient()
+	smsClient, close, err := sms.NewClient(ServiceName)
 	if err != nil {
 		return nil, s.internalError(err, "unable to initiate sms connection")
 	}
@@ -233,7 +281,7 @@ func (s *botServer) AlertRemovedShifts(ctx context.Context, req *bot.AlertRemove
 
 	botCtx := botContext()
 
-	accountClient, close, err := account.NewClient()
+	accountClient, close, err := account.NewClient(ServiceName)
 	if err != nil {
 		return nil, s.internalError(err, "unable to initiate account connection")
 	}
@@ -244,7 +292,7 @@ func (s *botServer) AlertRemovedShifts(ctx context.Context, req *bot.AlertRemove
 		return nil, s.internalError(err, "cannot find user")
 	}
 
-	companyClient, close, err := company.NewClient()
+	companyClient, close, err := company.NewClient(ServiceName)
 	if err != nil {
 		return nil, s.internalError(err, "unable to initiate company connection")
 	}
@@ -289,7 +337,7 @@ func (s *botServer) AlertRemovedShifts(ctx context.Context, req *bot.AlertRemove
 	}
 
 	msg := fmt.Sprintf("%s Your %s manager just removed %d of your shifts so you are no longer working it. \n Your new shifts are: \n%s", u.Greet(), c.Name, len(shifts), newShifts)
-	smsClient, close, err := sms.NewClient()
+	smsClient, close, err := sms.NewClient(ServiceName)
 	if err != nil {
 		return nil, s.internalError(err, "unable to initiate sms connection")
 	}
@@ -307,7 +355,7 @@ func (s *botServer) AlertChangedShift(ctx context.Context, req *bot.AlertChanged
 
 	botCtx := botContext()
 
-	accountClient, close, err := account.NewClient()
+	accountClient, close, err := account.NewClient(ServiceName)
 	if err != nil {
 		return nil, s.internalError(err, "unable to initiate account connection")
 	}
@@ -317,7 +365,7 @@ func (s *botServer) AlertChangedShift(ctx context.Context, req *bot.AlertChanged
 	if err != nil {
 		return nil, s.internalError(err, "cannot find user")
 	}
-	companyClient, close, err := company.NewClient()
+	companyClient, close, err := company.NewClient(ServiceName)
 	if err != nil {
 		return nil, s.internalError(err, "unable to initiate company connection")
 	}
@@ -365,7 +413,7 @@ func (s *botServer) AlertChangedShift(ctx context.Context, req *bot.AlertChanged
 
 	msg := fmt.Sprintf("%s Your %s manager just changed your shift: \nOld: %s\nNew:%s", u.Greet(), c.Name, oldShift, newShift)
 
-	smsClient, close, err := sms.NewClient()
+	smsClient, close, err := sms.NewClient(ServiceName)
 	if err != nil {
 		return nil, s.internalError(err, "unable to initiate sms connection")
 	}

@@ -100,3 +100,11 @@ func asyncContext() context.Context {
 	md := metadata.New(map[string]string{auth.AuthorizationMetadata: auth.AuthorizationCompanyService})
 	return metadata.NewOutgoingContext(context.Background(), md)
 }
+
+func asyncContext2(inCtx context.Context) context.Context {
+	incomingMD, _ := metadata.FromIncomingContext(inCtx)
+	newMD := incomingMD.Copy()
+	newMD.Set(auth.AuthorizationMetadata, auth.AuthorizationCompanyService)
+	// return metadata.NewOutgoingContext(context.Background(), newMD)
+	return metadata.NewOutgoingContext(inCtx, newMD)
+}

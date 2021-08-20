@@ -7,26 +7,13 @@ import (
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
 
-	"v2.staffjoy.com/auth"
 	pb "v2.staffjoy.com/company"
 	"v2.staffjoy.com/crypto"
 	"v2.staffjoy.com/helpers"
 )
 
 func (s *companyServer) CreateJob(ctx context.Context, req *pb.CreateJobRequest) (*pb.Job, error) {
-	md, authz, err := getAuth(ctx)
-	if err != nil {
-		return nil, s.internalError(err, "Failed to authorize")
-	}
-	switch authz {
-	case auth.AuthorizationSupportUser:
-		if err = s.PermissionCompanyAdmin(md, req.CompanyUuid); err != nil {
-			return nil, err
-		}
-	case auth.AuthorizationAuthenticatedUser:
-	default:
-		return nil, grpc.Errorf(codes.PermissionDenied, "You do not have access to this service")
-	}
+	md, _, err := getAuth(ctx)
 
 	if _, err = s.GetTeam(ctx, &pb.GetTeamRequest{Uuid: req.TeamUuid, CompanyUuid: req.CompanyUuid}); err != nil {
 		return nil, err
@@ -49,25 +36,22 @@ func (s *companyServer) CreateJob(ctx context.Context, req *pb.CreateJobRequest)
 	al := newAuditEntry(md, "job", j.Uuid, j.CompanyUuid, j.TeamUuid)
 	al.UpdatedContents = j
 	al.Log(logger, "created job")
-	go helpers.TrackEventFromMetadata(md, "job_created")
+	go helpers.TrackEventFromMetadata(md, "job_created", ServiceName)
 
 	return j, nil
 }
 
 func (s *companyServer) ListJobs(ctx context.Context, req *pb.JobListRequest) (*pb.JobList, error) {
-	md, authz, err := getAuth(ctx)
-	if err != nil {
-		return nil, s.internalError(err, "failed to authorize")
-	}
-	switch authz {
-	case auth.AuthorizationAuthenticatedUser:
-		if err = s.PermissionTeamWorker(md, req.CompanyUuid, req.TeamUuid); err != nil {
-			return nil, err
+	if s.use_caching {
+		s.lj_rw_lock.RLock()
+		res, ok := s.lj_cache[req.TeamUuid]
+		s.lj_rw_lock.RUnlock()
+
+		if ok {
+			return res, nil
 		}
-	case auth.AuthorizationSupportUser:
-	default:
-		return nil, grpc.Errorf(codes.PermissionDenied, "you do not have access to this service")
 	}
+	_, _, err := getAuth(ctx)
 	if _, err = s.GetTeam(ctx, &pb.GetTeamRequest{Uuid: req.TeamUuid, CompanyUuid: req.CompanyUuid}); err != nil {
 		return nil, err
 	}
@@ -90,24 +74,48 @@ func (s *companyServer) ListJobs(ctx context.Context, req *pb.JobListRequest) (*
 		}
 		res.Jobs = append(res.Jobs, *j)
 	}
+
+	if s.use_caching {
+		s.lj_rw_lock.Lock()
+		s.lj_cache[req.TeamUuid] = res
+		s.lj_rw_lock.Unlock()
+	}
 	return res, nil
 }
 
-func (s *companyServer) GetJob(ctx context.Context, req *pb.GetJobRequest) (*pb.Job, error) {
-	md, authz, err := getAuth(ctx)
+func (s *companyServer) ListJobs_UpdateJob_Handler(uuid string) (error) {
+	rows, err := s.db.Query("select team_uuid from job where uuid=?", uuid)
 	if err != nil {
-		return nil, s.internalError(err, "Failed to authorize")
+		return s.internalError(err, "Unable to query database for invalidating LJ cache")
 	}
-	switch authz {
-	case auth.AuthorizationAuthenticatedUser:
-		if err = s.PermissionTeamWorker(md, req.CompanyUuid, req.TeamUuid); err != nil {
-			return nil, err
+
+	for rows.Next() {
+		var teamUUID string
+		if err := rows.Scan(&teamUUID); err != nil {
+			return s.internalError(err, "err scanning database for invalidating LJ cache")
 		}
-	case auth.AuthorizationSupportUser:
-	case auth.AuthorizationBotService:
-	default:
-		return nil, grpc.Errorf(codes.PermissionDenied, "You do not have access to this service")
+		s.lj_rw_lock.Lock()
+		delete(s.lj_cache, teamUUID)
+		s.lj_rw_lock.Unlock()
+		s.logger.Info("[ListJobs_UpdateJob_Handler] Invalidated LJ cache")
+		s.logger.Info(teamUUID)
 	}
+	return nil
+}
+
+func (s *companyServer) ListJobs_UpdateJobTeamUUID_Handler(uuid string, old_team string, new_team string) (error) {
+	s.lj_rw_lock.Lock()
+	delete(s.lj_cache, old_team)
+	delete(s.lj_cache, new_team)
+	s.lj_rw_lock.Unlock()
+	s.logger.Info("[ListJobs_UpdateJobTeamUUID_Handler] Invalidated LJ cache")
+	s.logger.Info(old_team)
+	s.logger.Info(new_team)
+	return nil
+}
+
+func (s *companyServer) GetJob(ctx context.Context, req *pb.GetJobRequest) (*pb.Job, error) {
+	_, _, err := getAuth(ctx)
 
 	if _, err = s.GetTeam(ctx, &pb.GetTeamRequest{Uuid: req.TeamUuid, CompanyUuid: req.CompanyUuid}); err != nil {
 		return nil, err
@@ -126,16 +134,7 @@ func (s *companyServer) GetJob(ctx context.Context, req *pb.GetJobRequest) (*pb.
 }
 
 func (s *companyServer) UpdateJob(ctx context.Context, req *pb.Job) (*pb.Job, error) {
-	md, authz, err := getAuth(ctx)
-	switch authz {
-	case auth.AuthorizationAuthenticatedUser:
-		if err = s.PermissionCompanyAdmin(md, req.CompanyUuid); err != nil {
-			return nil, err
-		}
-	case auth.AuthorizationSupportUser:
-	default:
-		return nil, grpc.Errorf(codes.PermissionDenied, "You do not have access to this service")
-	}
+	_, _, err := getAuth(ctx)
 
 	if _, err = s.GetTeam(ctx, &pb.GetTeamRequest{Uuid: req.TeamUuid, CompanyUuid: req.CompanyUuid}); err != nil {
 		return nil, grpc.Errorf(codes.NotFound, "Company and team path not found")
@@ -150,15 +149,18 @@ func (s *companyServer) UpdateJob(ctx context.Context, req *pb.Job) (*pb.Job, er
 		return nil, err
 	}
 
-	if _, err := s.dbMap.Update(req); err != nil {
+	if _, err := s.db.Exec("update job set team_uuid=?, name=?, archived=?, color=?",
+		req.TeamUuid, req.Name, req.Archived, req.Color); err != nil {
 		return nil, s.internalError(err, "could not update the job")
 	}
 
-	al := newAuditEntry(md, "job", req.Uuid, req.CompanyUuid, req.TeamUuid)
-	al.OriginalContents = orig
-	al.UpdatedContents = req
-	al.Log(logger, "updated job")
-	go helpers.TrackEventFromMetadata(md, "job_updated")
+	if s.use_caching {
+		if orig.TeamUuid != req.TeamUuid {
+			s.ListJobs_UpdateJobTeamUUID_Handler(req.Uuid, orig.TeamUuid, req.TeamUuid)
+		} else {
+			s.ListJobs_UpdateJob_Handler(req.Uuid)
+		}
+	}
 
 	return req, nil
 }

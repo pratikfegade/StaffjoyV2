@@ -6,10 +6,12 @@ go_library(
     name = "email",
     srcs = [
         "client.go",
-        "constants.go",
+        # "constants.go",
+        "connection_info.go",
         "email.pb.go",
     ],
     deps = [
+        "//tracing",
         "@go_gogo_protobuf//:gogoproto",
         "@go_gogo_protobuf//:proto",
         "@go_grpc//:grpc",

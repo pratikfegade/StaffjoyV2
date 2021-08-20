@@ -7,10 +7,12 @@ go_library(
     srcs = [
         "account.pb.go",
         "client.go",
-        "constants.go",
+        # "constants.go",
+        "connection_info.go",
     ],
     deps = [
         "//auth",
+        "//tracing",
         "@go_gogo_protobuf//:gogoproto",
         "@go_gogo_protobuf//:proto",
         "@go_gogo_protobuf//:types",

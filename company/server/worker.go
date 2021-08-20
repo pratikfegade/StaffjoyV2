@@ -6,27 +6,21 @@ import (
 	"google.golang.org/grpc/codes"
 
 	"github.com/golang/protobuf/ptypes/empty"
-	"v2.staffjoy.com/auth"
 	pb "v2.staffjoy.com/company"
 	"v2.staffjoy.com/helpers"
 )
 
 func (s *companyServer) ListWorkers(ctx context.Context, req *pb.WorkerListRequest) (*pb.Workers, error) {
-	// Prep
-	md, authz, err := getAuth(ctx)
-	if err != nil {
-		return nil, s.internalError(err, "failed to authorize")
-	}
-
-	switch authz {
-	case auth.AuthorizationAuthenticatedUser:
-		if err = s.PermissionTeamWorker(md, req.CompanyUuid, req.TeamUuid); err != nil {
-			return nil, err
+	if s.use_caching {
+		s.lw_rw_lock.RLock()
+		res, ok := s.lw_cache[req.TeamUuid]
+		s.lw_rw_lock.RUnlock()
+		if ok {
+			return res, nil
 		}
-	case auth.AuthorizationSupportUser:
-	default:
-		return nil, grpc.Errorf(codes.PermissionDenied, "You do not have access to this service")
 	}
+	// Prep
+	_, _, err := getAuth(ctx)
 
 	if _, err = s.GetTeam(ctx, &pb.GetTeamRequest{CompanyUuid: req.CompanyUuid, Uuid: req.TeamUuid}); err != nil {
 		return nil, err
@@ -50,25 +44,48 @@ func (s *companyServer) ListWorkers(ctx context.Context, req *pb.WorkerListReque
 		}
 		res.Workers = append(res.Workers, *e)
 	}
+
+	if s.use_caching {
+		s.lw_rw_lock.Lock()
+		s.lw_cache[req.TeamUuid] = res
+		s.lw_rw_lock.Unlock()
+	}
 	return res, nil
 }
 
-func (s *companyServer) GetWorker(ctx context.Context, req *pb.Worker) (*pb.DirectoryEntry, error) {
-	md, authz, err := getAuth(ctx)
+func (s *companyServer) ListWorkers_UpdateAccount_Handler(ctx context.Context, req *pb.WorkerOfRequest) ( *pb.WorkerOfRequest, error) {
+	s.logger.Info("[ListWorkers_UpdateAccount_Handler] Called")
+	rows, err := s.db.Query("select team_uuid from worker where user_uuid=?", req.UserUuid)
 	if err != nil {
-		return nil, s.internalError(err, "failed to authorize")
+		return req, s.internalError(err, "Unable to query database for invalidating LW cache")
 	}
 
-	switch authz {
-	case auth.AuthorizationAuthenticatedUser:
-		if err = s.PermissionTeamWorker(md, req.CompanyUuid, req.TeamUuid); err != nil {
-			return nil, err
+	for rows.Next() {
+		var teamUUID string
+		if err := rows.Scan(&teamUUID); err != nil {
+			return req, s.internalError(err, "err scanning database for invalidating LW cache")
 		}
-	case auth.AuthorizationSupportUser:
-	case auth.AuthorizationWWWService:
-	default:
-		return nil, grpc.Errorf(codes.PermissionDenied, "you do not have access to this service")
+		s.lw_rw_lock.Lock()
+		delete(s.lw_cache, teamUUID)
+		s.lw_rw_lock.Unlock()
+		s.logger.Info("[ListWorkers_UpdateAccount_Handler] Invalidated cache")
+		s.logger.Info(teamUUID)
 	}
+	return req, nil
+}
+
+func (s *companyServer) ListWorkers_DeleteWorker_Handler(team_uuid string) ( error) {
+
+	s.lw_rw_lock.Lock()
+	delete(s.lw_cache, team_uuid)
+	s.lw_rw_lock.Unlock()
+	s.logger.Info("[ListWorkers_DeleteWorker_Handler] Invalidated cache")
+	s.logger.Info(team_uuid)
+	return nil
+}
+
+func (s *companyServer) GetWorker(ctx context.Context, req *pb.Worker) (*pb.DirectoryEntry, error) {
+	_, _, err := getAuth(ctx)
 	if _, err = s.GetTeam(ctx, &pb.GetTeamRequest{CompanyUuid: req.CompanyUuid, Uuid: req.TeamUuid}); err != nil {
 		return nil, err
 	}
@@ -84,20 +101,7 @@ func (s *companyServer) GetWorker(ctx context.Context, req *pb.Worker) (*pb.Dire
 }
 
 func (s *companyServer) DeleteWorker(ctx context.Context, req *pb.Worker) (*empty.Empty, error) {
-	md, authz, err := getAuth(ctx)
-	if err != nil {
-		return nil, s.internalError(err, "Failed to authorize")
-	}
-
-	switch authz {
-	case auth.AuthorizationAuthenticatedUser:
-		if err = s.PermissionCompanyAdmin(md, req.CompanyUuid); err != nil {
-			return nil, err
-		}
-	case auth.AuthorizationSupportUser:
-	default:
-		return nil, grpc.Errorf(codes.PermissionDenied, "You do not have access to this service")
-	}
+	md, _, err := getAuth(ctx)
 
 	if _, err = s.GetWorker(ctx, req); err != nil {
 		return nil, err
@@ -105,29 +109,28 @@ func (s *companyServer) DeleteWorker(ctx context.Context, req *pb.Worker) (*empt
 	if _, err = s.db.Exec("DELETE from worker where (team_uuid=? AND user_uuid=?) LIMIT 1", req.TeamUuid, req.UserUuid); err != nil {
 		return nil, s.internalError(err, "failed to query database")
 	}
+
+	if s.use_caching {
+		err = s.ListWorkers_DeleteWorker_Handler(req.TeamUuid)
+		err = s.GetWorkerOf_DeleteWorker_Handler(req.UserUuid)
+	}
+
 	al := newAuditEntry(md, "worker", req.UserUuid, req.CompanyUuid, req.TeamUuid)
 	al.Log(logger, "removed worker")
-	go helpers.TrackEventFromMetadata(md, "worker_deleted")
+	go helpers.TrackEventFromMetadata(md, "worker_deleted", ServiceName)
 	return &empty.Empty{}, nil
-
 }
 
 func (s *companyServer) GetWorkerOf(ctx context.Context, req *pb.WorkerOfRequest) (*pb.WorkerOfList, error) {
-	_, authz, err := getAuth(ctx)
-	if err != nil {
-		return nil, s.internalError(err, "Failed to authorize")
+	if s.use_caching {
+		s.gwe_rw_lock.RLock()
+		res, ok := s.gwe_cache[req.UserUuid]
+		s.gwe_rw_lock.RUnlock()
+		if ok {
+			return res, nil
+		}
 	}
-
-	switch authz {
-	case auth.AuthorizationAccountService:
-	case auth.AuthorizationWWWService:
-	case auth.AuthorizationAuthenticatedUser:
-	case auth.AuthorizationSupportUser:
-		//  This is an internal endpoint
-	case auth.AuthorizationWhoamiService:
-	default:
-		return nil, grpc.Errorf(codes.PermissionDenied, "You do not have access to this service")
-	}
+	_, _, err := getAuth(ctx)
 
 	res := &pb.WorkerOfList{UserUuid: req.UserUuid}
 
@@ -148,29 +151,49 @@ func (s *companyServer) GetWorkerOf(ctx context.Context, req *pb.WorkerOfRequest
 		res.Teams = append(res.Teams, *t)
 	}
 
+	if s.use_caching {
+		s.gwe_rw_lock.Lock()
+		s.gwe_cache[req.UserUuid] = res
+		s.gwe_rw_lock.Unlock()
+	}
 	return res, nil
+
+}
+
+func (s *companyServer) GetWorkerOf_UpdateTeam_Handler(uuid string) (error) {
+	rows, err := s.db.Query("select worker.user_uuid from worker where worker.team_uuid=?", uuid)
+	if err != nil {
+		return s.internalError(err, "Unable to query database for invalidating GWE cache")
+	}
+
+	for rows.Next() {
+		var userUUID string
+		if err := rows.Scan(&userUUID); err != nil {
+			return s.internalError(err, "err scanning database for invalidating GWE cache")
+		}
+		s.gwe_rw_lock.Lock()
+		delete(s.gwe_cache, userUUID)
+		s.gwe_rw_lock.Unlock()
+		s.logger.Info("[GetWorkerOf_UpdateTeam_Handler] Invalidated cache")
+		s.logger.Info(userUUID)
+	}
+	return nil
+}
+
+func (s *companyServer) GetWorkerOf_DeleteWorker_Handler(uuid string) (error) {
+	s.gwe_rw_lock.Lock()
+	delete(s.gwe_cache, uuid)
+	s.gwe_rw_lock.Unlock()
+	s.logger.Info("[GetWorkerOf_UpdateTeam_Handler] Invalidated cache")
+	s.logger.Info(uuid)
+	return nil
 }
 
 func (s *companyServer) CreateWorker(ctx context.Context, req *pb.Worker) (*pb.DirectoryEntry, error) {
-	md, authz, err := getAuth(ctx)
-	if err != nil {
-		return nil, s.internalError(err, "failed to authorize")
-	}
-
-	switch authz {
-	case auth.AuthorizationAuthenticatedUser:
-		if err = s.PermissionCompanyAdmin(md, req.CompanyUuid); err != nil {
-			return nil, err
-		}
-	case auth.AuthorizationWhoamiService:
-	case auth.AuthorizationSupportUser:
-	case auth.AuthorizationWWWService:
-	default:
-		return nil, grpc.Errorf(codes.PermissionDenied, "You do not have access to this service")
-	}
-
+	md, _, err := getAuth(ctx)
 	if _, err := s.GetTeam(ctx, &pb.GetTeamRequest{CompanyUuid: req.CompanyUuid, Uuid: req.TeamUuid}); err != nil {
 		return nil, err
+
 	}
 	e, err := s.GetDirectoryEntry(ctx, &pb.DirectoryEntryRequest{CompanyUuid: req.CompanyUuid, UserUuid: req.UserUuid})
 	if err != nil {
@@ -190,7 +213,7 @@ func (s *companyServer) CreateWorker(ctx context.Context, req *pb.Worker) (*pb.D
 	}
 	al := newAuditEntry(md, "worker", req.UserUuid, req.CompanyUuid, req.TeamUuid)
 	al.Log(logger, "added worker")
-	go helpers.TrackEventFromMetadata(md, "worker_created")
+	go helpers.TrackEventFromMetadata(md, "worker_created", ServiceName)
 
 	return e, nil
 }

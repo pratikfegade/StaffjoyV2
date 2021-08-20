@@ -24,6 +24,8 @@ import (
 	pb "v2.staffjoy.com/email"
 	"v2.staffjoy.com/environments"
 	"v2.staffjoy.com/healthcheck"
+	tracing "v2.staffjoy.com/tracing"
+	otgrpc "github.com/opentracing-contrib/go-grpc"
 )
 
 const (
@@ -58,6 +60,7 @@ func init() {
 	logger = config.GetLogger(ServiceName)
 }
 
+
 func main() {
 	logger.Debugf("Booting emailserver environment %s", config.Name)
 	s := &emailServer{logger: logger, config: &config, clientMutex: &sync.Mutex{}}
@@ -74,8 +77,13 @@ func main() {
 		logger.Panicf("failed to listen: %v", err)
 	}
 
-	var opts []grpc.ServerOption
-	grpcServer := grpc.NewServer(opts...)
+	tracer, closer := tracing.InitTracer(ServiceName)
+	defer closer.Close()
+
+	grpcServer := grpc.NewServer(grpc.UnaryInterceptor(
+		otgrpc.OpenTracingServerInterceptor(tracer)),
+		grpc.StreamInterceptor(
+			otgrpc.OpenTracingStreamServerInterceptor(tracer)))
 	pb.RegisterEmailServiceServer(grpcServer, s)
 
 	// set up a health check listener for kubernetes

@@ -23,6 +23,7 @@ protoc \
 mv ./account/account.pb.gw.go ./account/api/
 
 sed -i "s/package account/package main/g" account/api/account.pb.go
+# sed -i "`json:"-"`/`json:"-" db:"-"`/g" account/api/account.pb.go
 sed -i "s/package account/package main/g" account/api/account.pb.gw.go
 
 # Main account package
@@ -54,7 +55,7 @@ protoc \
     -I $GOPATH/pkg/mod \
     --gogo_out=plugins=grpc:.. \
     ./protobuf/email.proto
-    
+
 # sms.proto -> sms
 protoc \
     -I ./protobuf/ \
@@ -89,6 +90,7 @@ protoc \
 mv ./company/company.pb.gw.go ./company/api/
 
 sed -i "s/package company/package main/g" company/api/company.pb.go
+# sed -i "`json:"-"`/`json:"-" db:"-"`/g" company/api/company.pb.go
 sed -i "s/package company/package main/g" company/api/company.pb.gw.go
 
 # company.proto -> company
@@ -99,6 +101,7 @@ protoc \
     -I $GOPATH/pkg/mod/github.com/grpc-ecosystem/grpc-gateway/third_party/googleapis \
     --gogo_out=Mgoogle/api/annotations.proto=google.golang.org/genproto/googleapis/api/annotations,plugins=grpc:../ \
     ./protobuf/company.proto
+
 # swagger
 protoc \
     -I ./protobuf/ \

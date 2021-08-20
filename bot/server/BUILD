@@ -29,6 +29,7 @@ go_binary(
         "@go_logrus//:logrus",
         "@go_protobuf//:ptypes",
         "@go_protobuf//:ptypes/empty",
+        "@go_protobuf//:ptypes/timestamp",
         "@go_x_net//:context",
     ],
 )

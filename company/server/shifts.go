@@ -5,6 +5,7 @@ import (
 
 	_ "github.com/go-sql-driver/mysql"
 	"github.com/golang/protobuf/ptypes/empty"
+	"github.com/golang/protobuf/ptypes"
 
 	"golang.org/x/net/context"
 	"google.golang.org/grpc"
@@ -65,29 +66,298 @@ func (s *companyServer) CreateShift(ctx context.Context, req *pb.CreateShiftRequ
 	}
 
 	shift := &pb.Shift{Uuid: uuid.String(), CompanyUuid: req.CompanyUuid, TeamUuid: req.TeamUuid, JobUuid: req.JobUuid, Start: req.Start, Stop: req.Stop, Published: req.Published, UserUuid: req.UserUuid}
-	if err = s.dbMap.Insert(shift); err != nil {
-		return nil, s.internalError(err, "could not create shift")
-	}
+	// if err = s.dbMap.Insert(shift); err != nil {
+	// 	return nil, s.internalError(err, "could not create shift")
+	// }
 	al := newAuditEntry(md, "shift", shift.Uuid, shift.CompanyUuid, req.TeamUuid)
 	al.UpdatedContents = shift
 	al.Log(logger, "created shift")
 
 	go func() {
 		if shift.UserUuid != "" && shift.Published {
-			botClient, close, err := bot.NewClient()
+			botClient, close, err := bot.NewClient(ServiceName)
 			if err != nil {
 				s.internalError(err, "unable to initiate bot connection")
 				return
 			}
 			defer close()
-			if _, err := botClient.AlertNewShift(asyncContext(), &bot.AlertNewShiftRequest{UserUuid: shift.UserUuid, NewShift: shift}); err != nil {
+			if _, err := botClient.AlertNewShift(asyncContext2(ctx), &bot.AlertNewShiftRequest{UserUuid: shift.UserUuid, NewShift: shift}); err != nil {
 				s.internalError(err, "failed to alert worker about new shift")
 			}
 		}
 	}()
-	go helpers.TrackEventFromMetadata(md, "shift_created")
+	go helpers.TrackEventFromMetadata(md, "shift_created", ServiceName)
 	if req.Published {
-		go helpers.TrackEventFromMetadata(md, "shift_published")
+		go helpers.TrackEventFromMetadata(md, "shift_published", ServiceName)
+	}
+
+	return shift, nil
+}
+
+func (s *companyServer) CreateShiftOptimized(ctx context.Context, req *pb.CreateShiftRequest) (*pb.Shift, error) {
+
+	md, authz, err := getAuth(ctx)
+	if err != nil {
+		return nil, s.internalError(err, "failed to authorize")
+	}
+	switch authz {
+	case auth.AuthorizationSupportUser:
+		if err = s.PermissionCompanyAdmin(md, req.CompanyUuid); err != nil {
+			return nil, err
+		}
+	case auth.AuthorizationAuthenticatedUser:
+	default:
+		return nil, grpc.Errorf(codes.PermissionDenied, "You do not have access to this service")
+	}
+
+	team, err := s.GetTeam(ctx, &pb.GetTeamRequest{Uuid: req.TeamUuid, CompanyUuid: req.CompanyUuid})
+	if err != nil {
+		return nil, err
+	}
+	var job *pb.Job
+	if req.JobUuid != "" {
+		job, err = s.GetJob(ctx, &pb.GetJobRequest{Uuid: req.JobUuid, CompanyUuid: req.CompanyUuid, TeamUuid: req.TeamUuid})
+		if err != nil {
+			return nil, grpc.Errorf(codes.InvalidArgument, "Invalid job parameter, %v", err)
+		}
+	}
+
+	var directory_entry *pb.DirectoryEntry
+	if req.UserUuid != "" {
+		if directory_entry, err = s.GetDirectoryEntry(ctx,
+			&pb.DirectoryEntryRequest{CompanyUuid: req.CompanyUuid, UserUuid: req.UserUuid}); err != nil {
+			return nil, err
+		}
+	}
+
+	uuid, err := crypto.NewUUID()
+	if err != nil {
+		return nil, s.internalError(err, "cannot generate a uuid")
+	}
+
+	dur := req.Stop.Sub(req.Start)
+	if dur <= 0 {
+		return nil, grpc.Errorf(codes.InvalidArgument, "stop must be after start")
+	} else if dur > maxShiftDuration {
+		return nil, grpc.Errorf(codes.InvalidArgument, "Shifts exceed max %f hour duration", maxShiftDuration.Hours())
+	}
+
+	shift := &pb.Shift{Uuid: uuid.String(), CompanyUuid: req.CompanyUuid, TeamUuid: req.TeamUuid, JobUuid: req.JobUuid, Start: req.Start, Stop: req.Stop, Published: req.Published, UserUuid: req.UserUuid}
+	// if err = s.dbMap.Insert(shift); err != nil {
+	// 	return nil, s.internalError(err, "could not create shift")
+	// }
+	al := newAuditEntry(md, "shift", shift.Uuid, shift.CompanyUuid, req.TeamUuid)
+	al.UpdatedContents = shift
+	al.Log(logger, "created shift")
+
+	company, err := s.GetCompany(ctx, &pb.GetCompanyRequest{Uuid: req.CompanyUuid})
+	if err != nil {
+		return nil, grpc.Errorf(codes.InvalidArgument, "Invalid company parameter")
+	}
+
+	go func(user_name string, user_phnum string, user_email string,
+		job_name string, team_timezone string, company_name string) {
+		if shift.UserUuid != "" && shift.Published {
+			botClient, close, err := bot.NewClient(ServiceName)
+			if err != nil {
+				s.internalError(err, "unable to initiate bot connection")
+				return
+			}
+			defer close()
+
+			start, _ := ptypes.TimestampProto(shift.Start)
+			stop, _ := ptypes.TimestampProto(shift.Stop)
+			_, err = botClient.AlertNewShiftOptimized(asyncContext(),
+				&bot.AlertNewShiftOptimizedRequest{
+					UserName: user_name,
+					UserPhNum: user_phnum,
+					UserEmail: user_email,
+					JobName: job_name,
+					TeamTimezone: team_timezone,
+					ShiftStart: start,
+					ShiftStop: stop,
+					CompanyName: company_name,
+				})
+			if err != nil {
+				s.internalError(err, "failed to alert worker about new shift")
+			}
+		}
+	}(directory_entry.Name, directory_entry.Phonenumber, directory_entry.Email, job.Name, team.Timezone, company.Name)
+
+	go helpers.TrackEventFromMetadata(md, "shift_created", ServiceName)
+	if req.Published {
+		go helpers.TrackEventFromMetadata(md, "shift_published", ServiceName)
+	}
+
+	return shift, nil
+}
+
+func (s *companyServer) CreateShiftSync(ctx context.Context, req *pb.CreateShiftRequest) (*pb.Shift, error) {
+	md, authz, err := getAuth(ctx)
+	if err != nil {
+		return nil, s.internalError(err, "failed to authorize")
+	}
+	switch authz {
+	case auth.AuthorizationSupportUser:
+		if err = s.PermissionCompanyAdmin(md, req.CompanyUuid); err != nil {
+			return nil, err
+		}
+	case auth.AuthorizationAuthenticatedUser:
+	default:
+		return nil, grpc.Errorf(codes.PermissionDenied, "You do not have access to this service")
+	}
+
+	if _, err = s.GetTeam(ctx, &pb.GetTeamRequest{Uuid: req.TeamUuid, CompanyUuid: req.CompanyUuid}); err != nil {
+		return nil, err
+	}
+	if req.JobUuid != "" {
+		if _, err = s.GetJob(ctx, &pb.GetJobRequest{Uuid: req.JobUuid, CompanyUuid: req.CompanyUuid, TeamUuid: req.TeamUuid}); err != nil {
+			return nil, grpc.Errorf(codes.InvalidArgument, "Invalid job parameter")
+		}
+	}
+
+	if req.UserUuid != "" {
+		if _, err = s.GetDirectoryEntry(ctx, &pb.DirectoryEntryRequest{CompanyUuid: req.CompanyUuid, UserUuid: req.UserUuid}); err != nil {
+			return nil, err
+		}
+	}
+
+	uuid, err := crypto.NewUUID()
+	if err != nil {
+		return nil, s.internalError(err, "cannot generate a uuid")
+	}
+
+	dur := req.Stop.Sub(req.Start)
+	if dur <= 0 {
+		return nil, grpc.Errorf(codes.InvalidArgument, "stop must be after start")
+	} else if dur > maxShiftDuration {
+		return nil, grpc.Errorf(codes.InvalidArgument, "Shifts exceed max %f hour duration", maxShiftDuration.Hours())
+	}
+
+	shift := &pb.Shift{Uuid: uuid.String(), CompanyUuid: req.CompanyUuid, TeamUuid: req.TeamUuid, JobUuid: req.JobUuid, Start: req.Start, Stop: req.Stop, Published: req.Published, UserUuid: req.UserUuid}
+	// if err = s.dbMap.Insert(shift); err != nil {
+	// 	return nil, s.internalError(err, "could not create shift")
+	// }
+	al := newAuditEntry(md, "shift", shift.Uuid, shift.CompanyUuid, req.TeamUuid)
+	al.UpdatedContents = shift
+	al.Log(logger, "created shift")
+
+	if shift.UserUuid != "" && shift.Published {
+		botClient, close, err := bot.NewClient(ServiceName)
+		if err == nil {
+			defer close()
+			if _, err := botClient.AlertNewShift(asyncContext(), &bot.AlertNewShiftRequest{UserUuid: shift.UserUuid, NewShift: shift}); err != nil {
+				s.internalError(err, "failed to alert worker about new shift")
+			}
+		} else {
+			s.internalError(err, "unable to initiate bot connection")
+		}
+	}
+
+	go helpers.TrackEventFromMetadata(md, "shift_created", ServiceName)
+	if req.Published {
+		go helpers.TrackEventFromMetadata(md, "shift_published", ServiceName)
+	}
+
+	return shift, nil
+}
+
+func (s *companyServer) CreateShiftSyncOptimized(ctx context.Context, req *pb.CreateShiftRequest) (*pb.Shift, error) {
+	// timeStart := time.Now()
+	// defer func() {
+	// 	s.logger.Infof("Exe time: %d", time.Since(timeStart).Microseconds())
+	// }()
+
+	md, authz, err := getAuth(ctx)
+	if err != nil {
+		return nil, s.internalError(err, "failed to authorize")
+	}
+	switch authz {
+	case auth.AuthorizationSupportUser:
+		if err = s.PermissionCompanyAdmin(md, req.CompanyUuid); err != nil {
+			return nil, err
+		}
+	case auth.AuthorizationAuthenticatedUser:
+	default:
+		return nil, grpc.Errorf(codes.PermissionDenied, "You do not have access to this service")
+	}
+
+	team, err := s.GetTeam(ctx, &pb.GetTeamRequest{Uuid: req.TeamUuid, CompanyUuid: req.CompanyUuid})
+	// _, err = s.GetTeam(ctx, &pb.GetTeamRequest{Uuid: req.TeamUuid, CompanyUuid: req.CompanyUuid})
+	if err != nil {
+		return nil, err
+	}
+	var job *pb.Job
+	if req.JobUuid != "" {
+		job, err = s.GetJob(ctx, &pb.GetJobRequest{Uuid: req.JobUuid, CompanyUuid: req.CompanyUuid, TeamUuid: req.TeamUuid})
+		// _, err = s.GetJob(ctx, &pb.GetJobRequest{Uuid: req.JobUuid, CompanyUuid: req.CompanyUuid, TeamUuid: req.TeamUuid})
+		if err != nil {
+			return nil, grpc.Errorf(codes.InvalidArgument, "Invalid job parameter")
+		}
+	}
+
+	var directory_entry *pb.DirectoryEntry
+	if req.UserUuid != "" {
+		if directory_entry, err = s.GetDirectoryEntry(ctx,
+			&pb.DirectoryEntryRequest{CompanyUuid: req.CompanyUuid, UserUuid: req.UserUuid}); err != nil {
+			return nil, err
+		}
+	}
+
+	uuid, err := crypto.NewUUID()
+	if err != nil {
+		return nil, s.internalError(err, "cannot generate a uuid")
+	}
+
+	dur := req.Stop.Sub(req.Start)
+	if dur <= 0 {
+		return nil, grpc.Errorf(codes.InvalidArgument, "stop must be after start")
+	} else if dur > maxShiftDuration {
+		return nil, grpc.Errorf(codes.InvalidArgument, "Shifts exceed max %f hour duration", maxShiftDuration.Hours())
+	}
+
+	shift := &pb.Shift{Uuid: uuid.String(), CompanyUuid: req.CompanyUuid, TeamUuid: req.TeamUuid,
+		JobUuid: req.JobUuid, Start: req.Start, Stop: req.Stop, Published: req.Published, UserUuid: req.UserUuid}
+	// if err = s.dbMap.Insert(shift); err != nil {
+	// 	return nil, s.internalError(err, "could not create shift")
+	// }
+	al := newAuditEntry(md, "shift", shift.Uuid, shift.CompanyUuid, req.TeamUuid)
+	al.UpdatedContents = shift
+	al.Log(logger, "created shift")
+
+	company, err := s.GetCompany(ctx, &pb.GetCompanyRequest{Uuid: req.CompanyUuid})
+	if err != nil {
+		return nil, grpc.Errorf(codes.InvalidArgument, "Invalid company parameter")
+	}
+
+	if shift.UserUuid != "" && shift.Published {
+		botClient, close, err := bot.NewClient(ServiceName)
+		if err == nil {
+			defer close()
+			start, _ := ptypes.TimestampProto(shift.Start)
+			stop, _ := ptypes.TimestampProto(shift.Stop)
+			_, err := botClient.AlertNewShiftOptimized(asyncContext(),
+				&bot.AlertNewShiftOptimizedRequest{
+					UserName: directory_entry.Name,
+					UserPhNum: directory_entry.Phonenumber,
+					UserEmail: directory_entry.Email,
+					JobName: job.Name,
+					TeamTimezone: team.Timezone,
+					ShiftStart: start,
+					ShiftStop: stop,
+					CompanyName: company.Name,
+				})
+			if err != nil {
+				s.internalError(err, "failed to alert worker about new shift")
+			}
+		} else {
+			s.internalError(err, "unable to initiate bot connection")
+		}
+	}
+
+	go helpers.TrackEventFromMetadata(md, "shift_created", ServiceName)
+	if req.Published {
+		go helpers.TrackEventFromMetadata(md, "shift_published", ServiceName)
 	}
 
 	return shift, nil
@@ -256,7 +526,7 @@ func (s *companyServer) BulkPublishShifts(ctx context.Context, req *pb.BulkPubli
 	go func() {
 		s.logger.Debugf("starting bulk shift notifications %v", notifs)
 		for userUUID, shifts := range notifs {
-			botClient, close, err := bot.NewClient()
+			botClient, close, err := bot.NewClient(ServiceName)
 			if err != nil {
 				s.internalError(err, "unable to initiate bot connection")
 				return
@@ -394,13 +664,13 @@ func (s *companyServer) UpdateShift(ctx context.Context, req *pb.Shift) (*pb.Shi
 	al.OriginalContents = orig
 	al.UpdatedContents = req
 	al.Log(logger, "updated shift")
-	go helpers.TrackEventFromMetadata(md, "shift_updated")
+	go helpers.TrackEventFromMetadata(md, "shift_updated", ServiceName)
 	if !orig.Published && req.Published {
-		go helpers.TrackEventFromMetadata(md, "shift_published")
+		go helpers.TrackEventFromMetadata(md, "shift_published", ServiceName)
 	}
 
 	go func() {
-		botClient, close, err := bot.NewClient()
+		botClient, close, err := bot.NewClient(ServiceName)
 		if err != nil {
 			s.internalError(err, "unable to initiate bot connection")
 			return
@@ -482,7 +752,7 @@ func (s *companyServer) DeleteShift(ctx context.Context, req *pb.GetShiftRequest
 
 	go func() {
 		if orig.UserUuid != "" && orig.Published && orig.Start.After(time.Now()) {
-			botClient, close, err := bot.NewClient()
+			botClient, close, err := bot.NewClient(ServiceName)
 			if err != nil {
 				s.internalError(err, "unable to initiate bot connection")
 				return
@@ -493,7 +763,7 @@ func (s *companyServer) DeleteShift(ctx context.Context, req *pb.GetShiftRequest
 			}
 		}
 	}()
-	go helpers.TrackEventFromMetadata(md, "shift_deleted")
+	go helpers.TrackEventFromMetadata(md, "shift_deleted", ServiceName)
 
 	return &empty.Empty{}, nil
 }

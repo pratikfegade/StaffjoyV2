@@ -14,11 +14,16 @@ import (
 	"v2.staffjoy.com/bot"
 	"v2.staffjoy.com/environments"
 	"v2.staffjoy.com/healthcheck"
+	tracing "v2.staffjoy.com/tracing"
+
+	_ "net/http/pprof"
+
+	otgrpc "github.com/opentracing-contrib/go-grpc"
 )
 
 const (
 	// ServiceName identifies this app in logs
-	ServiceName = "smsserver"
+	ServiceName = "botserver"
 
 	// ShiftWindow is the number of days out the bot will inform the worker
 	// of their schedule
@@ -61,15 +66,20 @@ func main() {
 		logger.Panicf("failed to listen: %v", err)
 	}
 
-	var opts []grpc.ServerOption
-	grpcServer := grpc.NewServer(opts...)
+	tracer, closer := tracing.InitTracer(ServiceName)
+	defer closer.Close()
+
+	grpcServer := grpc.NewServer(grpc.UnaryInterceptor(
+		otgrpc.OpenTracingServerInterceptor(tracer)),
+		grpc.StreamInterceptor(
+			otgrpc.OpenTracingStreamServerInterceptor(tracer)))
 	bot.RegisterBotServiceServer(grpcServer, s)
 
 	// set up a health check listener for kubernetes
 	go func() {
 		logger.Debugf("Booting botserver health check %s", config.Name)
 		http.HandleFunc(healthcheck.HEALTHPATH, healthcheck.Handler)
-		http.ListenAndServe(":80", nil)
+		http.ListenAndServe(":8967", nil)
 	}()
 
 	grpcServer.Serve(lis)

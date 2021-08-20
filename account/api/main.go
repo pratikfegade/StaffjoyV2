@@ -75,7 +75,8 @@ func run() error {
 	}
 	mux.Handle("/", gwmux)
 
-	return http.ListenAndServe(":80", mux)
+	apiServerPort := ":" + os.Getenv("ACCOUNT_API_SERVICE_PORT")
+	return http.ListenAndServe(apiServerPort, mux)
 }
 
 func main() {

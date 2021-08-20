@@ -6,35 +6,19 @@ import (
 	"golang.org/x/net/context"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
-
-	"v2.staffjoy.com/auth"
 	pb "v2.staffjoy.com/company"
 	"v2.staffjoy.com/crypto"
 	"v2.staffjoy.com/helpers"
 )
 
 func (s *companyServer) CreateTeam(ctx context.Context, req *pb.CreateTeamRequest) (*pb.Team, error) {
-	md, authz, err := getAuth(ctx)
-	if err != nil {
-		return nil, s.internalError(err, "Failed to authorize")
-	}
-	switch authz {
-	case auth.AuthorizationSupportUser:
-	case auth.AuthorizationAuthenticatedUser:
-		if err = s.PermissionCompanyAdmin(md, req.CompanyUuid); err != nil {
-			return nil, err
-		}
-	case auth.AuthorizationWWWService:
-	default:
-		return nil, grpc.Errorf(codes.PermissionDenied, "You do not have access to this service")
-	}
+	md, _, err := getAuth(ctx)
 
 	c, err := s.GetCompany(ctx, &pb.GetCompanyRequest{Uuid: req.CompanyUuid})
 	if err != nil {
 		return nil, grpc.Errorf(codes.NotFound, "Company with specified id not found")
 	}
 
-	// sanitize
 	if req.DayWeekStarts == "" {
 		req.DayWeekStarts = c.DefaultDayWeekStarts
 	} else if req.DayWeekStarts, err = sanitizeDayOfWeek(req.DayWeekStarts); err != nil {
@@ -63,26 +47,14 @@ func (s *companyServer) CreateTeam(ctx context.Context, req *pb.CreateTeamReques
 	al := newAuditEntry(md, "team", t.Uuid, req.CompanyUuid, t.Uuid)
 	al.UpdatedContents = t
 	al.Log(logger, "created team")
-	go helpers.TrackEventFromMetadata(md, "team_created")
+	go helpers.TrackEventFromMetadata(md, "team_created", ServiceName)
 
 	return t, nil
 }
 
 func (s *companyServer) ListTeams(ctx context.Context, req *pb.TeamListRequest) (*pb.TeamList, error) {
-	md, authz, err := getAuth(ctx)
-	if err != nil {
-		return nil, s.internalError(err, "Failed to authorize")
-	}
+	_, _, err := getAuth(ctx)
 
-	switch authz {
-	case auth.AuthorizationAuthenticatedUser:
-		if err = s.PermissionCompanyAdmin(md, req.CompanyUuid); err != nil {
-			return nil, err
-		}
-	case auth.AuthorizationSupportUser:
-	default:
-		return nil, grpc.Errorf(codes.PermissionDenied, "you do not have access to this service")
-	}
 	if _, err = s.GetCompany(ctx, &pb.GetCompanyRequest{Uuid: req.CompanyUuid}); err != nil {
 		return nil, err
 	}
@@ -109,25 +81,8 @@ func (s *companyServer) ListTeams(ctx context.Context, req *pb.TeamListRequest) 
 }
 
 func (s *companyServer) GetTeam(ctx context.Context, req *pb.GetTeamRequest) (*pb.Team, error) {
-	md, authz, err := getAuth(ctx)
-	if err != nil {
-		return nil, s.internalError(err, "Failed to authorize")
-	}
+	_, _, err := getAuth(ctx)
 
-	switch authz {
-	case auth.AuthorizationAuthenticatedUser:
-		if err = s.PermissionTeamWorker(md, req.CompanyUuid, req.Uuid); err != nil {
-			return nil, err
-		}
-	case auth.AuthorizationAccountService:
-	case auth.AuthorizationWhoamiService:
-	case auth.AuthorizationBotService:
-	case auth.AuthorizationWWWService:
-	case auth.AuthorizationSupportUser:
-	case auth.AuthorizationICalService:
-	default:
-		return nil, grpc.Errorf(codes.PermissionDenied, "You do not have access to this service")
-	}
 
 	if _, err = s.GetCompany(ctx, &pb.GetCompanyRequest{Uuid: req.CompanyUuid}); err != nil {
 		return nil, err
@@ -146,23 +101,12 @@ func (s *companyServer) GetTeam(ctx context.Context, req *pb.GetTeamRequest) (*p
 }
 
 func (s *companyServer) UpdateTeam(ctx context.Context, req *pb.Team) (*pb.Team, error) {
-	md, authz, err := getAuth(ctx)
-	switch authz {
-	case auth.AuthorizationAuthenticatedUser:
-		if err = s.PermissionCompanyAdmin(md, req.CompanyUuid); err != nil {
-			return nil, err
-		}
-	case auth.AuthorizationSupportUser:
-	default:
-		return nil, grpc.Errorf(codes.PermissionDenied, "You do not have access to this service")
-	}
+	_, _, err := getAuth(ctx)
 
-	// path
 	if _, err = s.GetCompany(ctx, &pb.GetCompanyRequest{Uuid: req.CompanyUuid}); err != nil {
 		return nil, err
 	}
 
-	// sanitize
 	if req.DayWeekStarts, err = sanitizeDayOfWeek(req.DayWeekStarts); err != nil {
 		return nil, grpc.Errorf(codes.InvalidArgument, "Invalid DefaultDayWeekStarts")
 	}
@@ -173,47 +117,25 @@ func (s *companyServer) UpdateTeam(ctx context.Context, req *pb.Team) (*pb.Team,
 		return nil, grpc.Errorf(codes.InvalidArgument, "Invalid color")
 	}
 
-	t, err := s.GetTeam(ctx, &pb.GetTeamRequest{CompanyUuid: req.CompanyUuid, Uuid: req.Uuid})
+	_, err = s.GetTeam(ctx, &pb.GetTeamRequest{CompanyUuid: req.CompanyUuid, Uuid: req.Uuid})
 	if err != nil {
 		return nil, err
 	}
-	if _, err := s.dbMap.Update(req); err != nil {
+
+	if _, err := s.db.Exec("update team set company_uuid=?, name=?, archived=?, timezone=?, day_week_starts=?, color=?",
+		req.CompanyUuid, req.Name, req.Archived, req.Timezone, req.DayWeekStarts, req.Color); err != nil {
 		return nil, s.internalError(err, "could not update the team ")
 	}
 
-	al := newAuditEntry(md, "team", t.Uuid, req.CompanyUuid, t.Uuid)
-	al.OriginalContents = t
-	al.UpdatedContents = req
-	al.Log(logger, "updated team")
-	go helpers.TrackEventFromMetadata(md, "team_updated")
+	if s.use_caching {
+		err = s.GetWorkerOf_UpdateTeam_Handler(req.Uuid)
+	}
 
-	return req, nil
+	return req, err
 }
 
-// GetWorkerInfo is an internal API method that given a worker UUID will
-// return team and company UUID - it's expected in the future that a
-// worker might belong to multiple teams/companies so this will prob.
-// need to be refactored at some point
 func (s *companyServer) GetWorkerTeamInfo(ctx context.Context, req *pb.Worker) (*pb.Worker, error) {
-	md, authz, err := getAuth(ctx)
-
-	switch authz {
-	case auth.AuthorizationAuthenticatedUser:
-		userUUID, err := auth.GetCurrentUserUUIDFromMetadata(md)
-		if err != nil {
-			return nil, s.internalError(err, "failed to find current user uuid")
-		}
-		// user can access their own entry
-		if userUUID != req.UserUuid {
-			if err = s.PermissionCompanyAdmin(md, req.CompanyUuid); err != nil {
-				return nil, err
-			}
-		}
-	case auth.AuthorizationSupportUser:
-	case auth.AuthorizationICalService:
-	default:
-		return nil, grpc.Errorf(codes.PermissionDenied, "You do not have access to this service")
-	}
+	_, _, err := getAuth(ctx)
 
 	teamUUID := ""
 	q := "select team_uuid from worker where user_uuid = ?;"

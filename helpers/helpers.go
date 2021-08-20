@@ -10,7 +10,7 @@ import (
 
 // TrackEventFromMetadata determines the current user from gRPC context metadata
 // and tracks the event if it is an authenticated user
-func TrackEventFromMetadata(md metadata.MD, eventName string) (err error) {
+func TrackEventFromMetadata(md metadata.MD, eventName string, serviceName string) (err error) {
 	if len(md[auth.AuthorizationMetadata]) == 0 {
 		// noop - no authentication
 		return
@@ -26,16 +26,16 @@ func TrackEventFromMetadata(md metadata.MD, eventName string) (err error) {
 	if err != nil {
 		return
 	}
-	err = TrackEvent(userUUID, eventName)
+	err = TrackEvent(userUUID, eventName, serviceName)
 	return
 }
 
 // TrackEvent is a helper function for tracking user events
-func TrackEvent(userUUID, eventName string) (err error) {
+func TrackEvent(userUUID, eventName string, serviceName string) (err error) {
 	var s account.AccountServiceClient
 	var close func() error
 
-	s, close, err = account.NewClient()
+	s, close, err = account.NewClient(serviceName)
 	if err != nil {
 		return
 	}
@@ -46,11 +46,11 @@ func TrackEvent(userUUID, eventName string) (err error) {
 }
 
 // SyncUser is a helper function for re-sending user info to tracking services
-func SyncUser(userUUID string) (err error) {
+func SyncUser(userUUID string, serviceName string) (err error) {
 	var s account.AccountServiceClient
 	var close func() error
 
-	s, close, err = account.NewClient()
+	s, close, err = account.NewClient(serviceName)
 	if err != nil {
 		return
 	}

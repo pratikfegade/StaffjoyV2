@@ -18,3 +18,10 @@ func (u *user) Greet() string {
 	// todo - check current day of week, holidays, etc for more quirkiness
 	return fmt.Sprintf(standardGreetings[rand.Intn(len(standardGreetings))], fname)
 }
+
+// Return a random, friendly greeting
+func GreetWithName(name string) string {
+	fname := ExtractFirstName(name)
+	// todo - check current day of week, holidays, etc for more quirkiness
+	return fmt.Sprintf(standardGreetings[rand.Intn(len(standardGreetings))], fname)
+}

@@ -17,7 +17,7 @@ import (
 func (s *botServer) OnboardWorker(ctx context.Context, req *bot.OnboardWorkerRequest) (*empty.Empty, error) {
 	botCtx := botContext()
 
-	accountClient, close, err := account.NewClient()
+	accountClient, close, err := account.NewClient(ServiceName)
 	if err != nil {
 		return nil, s.internalError(err, "unable to initiate account connection")
 	}
@@ -29,7 +29,7 @@ func (s *botServer) OnboardWorker(ctx context.Context, req *bot.OnboardWorkerReq
 	}
 	u := user(*a)
 
-	companyClient, close, err := company.NewClient()
+	companyClient, close, err := company.NewClient(ServiceName)
 	if err != nil {
 		return nil, s.internalError(err, "unable to initiate company connection")
 	}
@@ -66,7 +66,7 @@ func (s *botServer) smsOnboard(a *account.Account, c *company.Company) {
 		//"Reply HELP now to see what you can do with Staffjoy",
 	}
 
-	smsClient, close, err := sms.NewClient()
+	smsClient, close, err := sms.NewClient(ServiceName)
 	if err != nil {
 		s.internalError(err, "unable to initiate sms connection")
 		return

@@ -49,3 +49,15 @@ vendor
 # in case you accidentally run npm at this level
 npm-debug.log
 node_modules/
+
+
+**/api/*api
+**/server/*server
+www/www
+logs/**
+**/*.go.bak
+
+
+loadgen/datagen
+loadgen/latencies/**
+**/__pycache__

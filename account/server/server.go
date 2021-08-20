@@ -41,6 +41,7 @@ type accountServer struct {
 	signingToken string
 	dbMap        *gorp.DbMap
 	smsClient    sms.SmsServiceClient
+	use_caching  bool
 }
 
 // GetOrCreate is for internal use by other APIs to match a user based on their phonenumber or email.
@@ -95,20 +96,9 @@ func (s *accountServer) GetAccountByPhonenumber(ctx context.Context, req *pb.Get
 }
 
 func (s *accountServer) Create(ctx context.Context, req *pb.CreateAccountRequest) (*pb.Account, error) {
-	md, authz, err := getAuth(ctx)
-	if err != nil {
-		return nil, s.internalError(err, "Failed to authorize")
-	}
+	md, _, err := getAuth(ctx)
+
 	al := newAuditEntry(md, "account", "")
-
-	switch authz {
-	case auth.AuthorizationSupportUser:
-	case auth.AuthorizationWWWService:
-	case auth.AuthorizationCompanyService:
-	default:
-		return nil, grpc.Errorf(codes.PermissionDenied, "You do not have access to this service")
-	}
-
 	if (len(req.Email) + len(req.Name) + len(req.Phonenumber)) == 0 {
 		return nil, grpc.Errorf(codes.InvalidArgument, "Empty request")
 	}
@@ -129,6 +119,7 @@ func (s *accountServer) Create(ctx context.Context, req *pb.CreateAccountRequest
 		if err == nil {
 			return nil, grpc.Errorf(codes.AlreadyExists, "A user with that email already exists. Try a password reset")
 		} else if err != sql.ErrNoRows {
+			s.logger.Infof("Error, %v", err)
 			return nil, s.internalError(err, "An unknown error occurred while searching for that email.")
 		}
 	}
@@ -173,7 +164,7 @@ func (s *accountServer) Create(ctx context.Context, req *pb.CreateAccountRequest
 			Subject:  "Activate your Staffjoy account",
 			HtmlBody: fmt.Sprintf(activateAccountTmpl, emailName, link.String(), link.String(), link.String()),
 		}
-		mailer, close, err := email.NewClient()
+		mailer, close, err := email.NewClient(ServiceName)
 		if err != nil {
 			return nil, s.internalError(err, "unable to initiate email service connection")
 		}
@@ -195,22 +186,12 @@ func (s *accountServer) Create(ctx context.Context, req *pb.CreateAccountRequest
 }
 
 func (s *accountServer) List(ctx context.Context, req *pb.GetAccountListRequest) (*pb.AccountList, error) {
-	_, authz, err := getAuth(ctx)
-	if err != nil {
-		return nil, s.internalError(err, "Failed to authorize")
-	}
-	switch authz {
-	case auth.AuthorizationSupportUser:
-	default:
-		return nil, grpc.Errorf(codes.PermissionDenied, "You do not have access to this service")
-	}
-
 	if req.Offset < 0 {
 		return nil, grpc.Errorf(codes.InvalidArgument, "Invalid offset - must be greater than or equal to zero")
 	}
 	if req.Limit <= 0 {
 		// Set a default
-		req.Limit = 10
+		req.Limit = 10000
 	}
 	res := &pb.AccountList{Limit: req.Limit, Offset: req.Offset}
 
@@ -235,72 +216,48 @@ func (s *accountServer) List(ctx context.Context, req *pb.GetAccountListRequest)
 }
 
 func (s *accountServer) Get(ctx context.Context, req *pb.GetAccountRequest) (*pb.Account, error) {
-	md, authz, err := getAuth(ctx)
-	if err != nil {
-		return nil, s.internalError(err, "Failed to authorize")
-	}
-	switch authz {
-	case auth.AuthorizationWWWService:
-	case auth.AuthorizationAccountService:
-	case auth.AuthorizationCompanyService:
-	case auth.AuthorizationWhoamiService:
-	case auth.AuthorizationBotService:
-	case auth.AuthorizationAuthenticatedUser:
-		uuid, err := auth.GetCurrentUserUUIDFromMetadata(md)
-		if err != nil {
-			return nil, s.internalError(err, "failed to find current user uuid %v", md)
-		}
-		if uuid != req.Uuid {
-			return nil, grpc.Errorf(codes.PermissionDenied, "You do not have access to this service")
-		}
-	case auth.AuthorizationSupportUser:
-	case auth.AuthorizationSuperpowersService:
-		if s.config.Name != "development" {
-			s.logger.Warningf("Development service trying to connect outside development environment")
-			return nil, grpc.Errorf(codes.PermissionDenied, "This service is not available outside development environments")
-		}
-	default:
-		return nil, grpc.Errorf(codes.PermissionDenied, "You do not have access to this service")
-	}
-
-	if req.Uuid == "" {
+ 	if req.Uuid == "" {
 		return nil, grpc.Errorf(codes.InvalidArgument, "uuid must be specified")
 	}
 	obj, err := s.dbMap.Get(pb.Account{}, req.Uuid)
 	if err != nil {
-		return nil, s.internalError(err, "Unable to query database")
-	} else if obj == nil {
-		return nil, grpc.Errorf(codes.NotFound, "User with id %s not found", req.Uuid)
+		return nil, s.internalError(err,
+			"Unable to query database or user with id %s not found", req.Uuid, err)
 	}
 	return obj.(*pb.Account), nil
 }
 
-func (s *accountServer) Update(ctx context.Context, req *pb.Account) (*pb.Account, error) {
-	md, authz, err := getAuth(ctx)
-	if err != nil {
-		return nil, s.internalError(err, "Failed to authorize")
-	}
-	switch authz {
-	case auth.AuthorizationWWWService:
-	case auth.AuthorizationCompanyService:
-	case auth.AuthorizationAuthenticatedUser:
-		uuid, err := auth.GetCurrentUserUUIDFromMetadata(md)
-		if err != nil {
-			return nil, s.internalError(err, "failed to find current user uuid")
+func (s *accountServer) GetPhNumFNameEmail(ctx context.Context, req *pb.GetAccountRequest) (*pb.PhNumFNameEmail, error) {
 
-		}
-		if uuid != req.Uuid {
-			return nil, grpc.Errorf(codes.PermissionDenied, "You do not have access to this service")
-		}
-	case auth.AuthorizationSupportUser:
-	case auth.AuthorizationSuperpowersService:
-		if s.config.Name != "development" {
-			s.logger.Warningf("Development service trying to connect outside development environment")
-			return nil, grpc.Errorf(codes.PermissionDenied, "This service is not available outside development environments")
-		}
-	default:
-		return nil, grpc.Errorf(codes.PermissionDenied, "You do not have access to this service")
+	if req.Uuid == "" {
+		return nil, grpc.Errorf(codes.InvalidArgument, "uuid must be specified")
 	}
+	var obj pb.Account
+	err := s.dbMap.SelectOne(&obj, "select * from account where uuid=?", req.Uuid)
+	// obj, err := s.dbMap.Get(pb.Account{}, req.Uuid)
+	if err != nil {
+		return nil, s.internalError(err,
+			"Unable to query database or user with id %s not found", req.Uuid)
+	}
+
+	var f_name string
+	names := strings.Split(obj.Name, " ")
+	if len(names) == 0 {
+		f_name = "there"
+	} else {
+		f_name = names[0]
+	}
+
+	return &pb.PhNumFNameEmail{
+		Phonenumber: obj.Phonenumber,
+		Email: obj.Email,
+		FName: f_name,
+	}, nil
+}
+
+func (s *accountServer) Update(ctx context.Context, req *pb.Account) (*pb.Account, error) {
+	md, _, err := getAuth(ctx)
+
 	al := newAuditEntry(md, "account", req.Uuid)
 
 	existing, err := s.Get(ctx, &pb.GetAccountRequest{Uuid: req.Uuid})
@@ -338,28 +295,11 @@ func (s *accountServer) Update(ctx context.Context, req *pb.Account) (*pb.Accoun
 		}
 	}
 
-	if authz == auth.AuthorizationAuthenticatedUser {
-		if (req.ConfirmedAndActive != existing.ConfirmedAndActive) && (existing.ConfirmedAndActive == false) {
-			return nil, grpc.Errorf(codes.PermissionDenied, "You cannot activate this account")
-		}
-		if req.Support != existing.Support {
-			return nil, grpc.Errorf(codes.PermissionDenied, "You cannot change the support parameter")
-		}
-		if req.PhotoUrl != existing.PhotoUrl {
-			return nil, grpc.Errorf(codes.PermissionDenied, "You cannot change the photo through this endpoint (see docs)")
-		}
-		// User can request email change - not do it :-)
-		if req.Email != existing.Email {
-			s.RequestEmailChange(ctx, &pb.EmailChangeRequest{Uuid: req.Uuid, Email: req.Email})
-			// revert
-			req.Email = existing.Email
-		}
-	}
-
 	req.PhotoUrl = GenerateGravatarURL(req.Email)
 
-	if _, err := s.dbMap.Update(req); err != nil {
-		return nil, s.internalError(err, "Could not update the user account")
+	if _, err := s.db.Exec("update account set email=?, name=?, confirmed_and_active=?, member_since=?, password_hash=?",
+		req.Email, req.Name, req.ConfirmedAndActive, req.MemberSince, req.PasswordHash); err != nil {
+		return nil, s.internalError(err, "could not update the user account")
 	}
 
 	go s.SyncUser(ctx, &pb.SyncUserRequest{Uuid: req.Uuid})
@@ -372,31 +312,49 @@ func (s *accountServer) Update(ctx context.Context, req *pb.Account) (*pb.Accoun
 		s.sendSmsGreeting(req.Phonenumber)
 	}
 
-	go helpers.TrackEventFromMetadata(md, "account_updated")
+	go helpers.TrackEventFromMetadata(md, "account_updated", ServiceName)
+
+	// Cache callbacks
+	companyClient, close, err := company.NewClient(ServiceName)
+	if err != nil {
+		return nil, s.internalError(err, "unable to initiate company connection")
+	}
+	defer close()
+
+	createMd := metadata.New(map[string]string{auth.AuthorizationMetadata: auth.AuthorizationWWWService})
+	newCtx, cancel := context.WithCancel(metadata.NewOutgoingContext(context.Background(), createMd))
+	defer cancel()
+
+	if s.use_caching {
+		_, err = companyClient.ListWorkers_UpdateAccount_Handler(newCtx, &company.WorkerOfRequest{UserUuid: req.Uuid})
+	}
+	if err != nil {
+		return nil, s.internalError(err, "error invalidating cache")
+	}
 
 	return req, nil
 }
 
 func (s *accountServer) UpdatePassword(ctx context.Context, req *pb.UpdatePasswordRequest) (*empty.Empty, error) {
-	md, authz, err := getAuth(ctx)
-	if err != nil {
-		return nil, s.internalError(err, "Failed to authorize")
-	}
-	switch authz {
-	case auth.AuthorizationAuthenticatedUser:
-		uuid, err := auth.GetCurrentUserUUIDFromMetadata(md)
-		if err != nil {
-			return nil, s.internalError(err, "failed to find current user uuid")
+	md, _, err := getAuth(ctx)
+	// if err != nil {
+	// 	return nil, s.internalError(err, "Failed to authorize")
+	// }
+	// switch authz {
+	// case auth.AuthorizationAuthenticatedUser:
+	// 	uuid, err := auth.GetCurrentUserUUIDFromMetadata(md)
+	// 	if err != nil {
+	// 		return nil, s.internalError(err, "failed to find current user uuid")
 
-		}
-		if uuid != req.Uuid {
-			return nil, grpc.Errorf(codes.PermissionDenied, "You do not have access to this service")
-		}
-	case auth.AuthorizationWWWService:
-	case auth.AuthorizationSupportUser:
-	default:
-		return nil, grpc.Errorf(codes.PermissionDenied, "You do not have access to this service")
-	}
+	// 	}
+	// 	if uuid != req.Uuid {
+	// 		return nil, grpc.Errorf(codes.PermissionDenied, "You do not have access to this service")
+	// 	}
+	// case auth.AuthorizationWWWService:
+	// case auth.AuthorizationSupportUser:
+	// default:
+	// 	return nil, grpc.Errorf(codes.PermissionDenied, "You do not have access to this service")
+	// }
 	al := newAuditEntry(md, "account", req.Uuid)
 
 	// Verify inputs
@@ -431,22 +389,22 @@ func (s *accountServer) UpdatePassword(ctx context.Context, req *pb.UpdatePasswo
 		return nil, grpc.Errorf(codes.NotFound, "")
 	}
 	al.Log(logger, "updated password")
-	go helpers.TrackEventFromMetadata(md, "password_updated")
+	go helpers.TrackEventFromMetadata(md, "password_updated", ServiceName)
 	return &empty.Empty{}, nil
 }
 
 func (s *accountServer) VerifyPassword(ctx context.Context, req *pb.VerifyPasswordRequest) (*pb.Account, error) {
-	// Prep
-	_, authz, err := getAuth(ctx)
-	if err != nil {
-		return nil, s.internalError(err, "Failed to authorize")
-	}
-	switch authz {
-	case auth.AuthorizationWWWService:
-	case auth.AuthorizationSupportUser:
-	default:
-		return nil, grpc.Errorf(codes.PermissionDenied, "You do not have access to this service")
-	}
+	// // Prep
+	_, _, err := getAuth(ctx)
+	// if err != nil {
+	// 	return nil, s.internalError(err, "Failed to authorize")
+	// }
+	// switch authz {
+	// case auth.AuthorizationWWWService:
+	// case auth.AuthorizationSupportUser:
+	// default:
+	// 	return nil, grpc.Errorf(codes.PermissionDenied, "You do not have access to this service")
+	// }
 
 	req.Email = strings.TrimSpace(strings.ToLower(req.Email))
 	var dbHash, salt, uuid sql.NullString
@@ -487,16 +445,16 @@ func (s *accountServer) VerifyPassword(ctx context.Context, req *pb.VerifyPasswo
 
 // RequestPasswordReset sends an email to a user with a password reset link
 func (s *accountServer) RequestPasswordReset(ctx context.Context, req *pb.PasswordResetRequest) (*empty.Empty, error) {
-	_, authz, err := getAuth(ctx)
-	if err != nil {
-		return nil, s.internalError(err, "Failed to authorize")
-	}
-	switch authz {
-	case auth.AuthorizationWWWService:
-	case auth.AuthorizationSupportUser:
-	default:
-		return nil, grpc.Errorf(codes.PermissionDenied, "You do not have access to this service")
-	}
+	_, _, err := getAuth(ctx)
+	// if err != nil {
+	// 	return nil, s.internalError(err, "Failed to authorize")
+	// }
+	// switch authz {
+	// case auth.AuthorizationWWWService:
+	// case auth.AuthorizationSupportUser:
+	// default:
+	// 	return nil, grpc.Errorf(codes.PermissionDenied, "You do not have access to this service")
+	// }
 
 	req.Email = strings.TrimSpace(strings.ToLower(req.Email))
 	if len(req.Email) == 0 {
@@ -534,7 +492,7 @@ func (s *accountServer) RequestPasswordReset(ctx context.Context, req *pb.Passwo
 		Subject:  message,
 		HtmlBody: fmt.Sprintf(tmpl, link.String(), link.String()),
 	}
-	mailer, close, err := email.NewClient()
+	mailer, close, err := email.NewClient(ServiceName)
 	if err != nil {
 		panic(err)
 	}
@@ -550,24 +508,24 @@ func (s *accountServer) RequestPasswordReset(ctx context.Context, req *pb.Passwo
 
 // RequestPasswordReset sends an email to a user with a password reset link
 func (s *accountServer) RequestEmailChange(ctx context.Context, req *pb.EmailChangeRequest) (*empty.Empty, error) {
-	md, authz, err := getAuth(ctx)
-	if err != nil {
-		return nil, s.internalError(err, "Failed to authorize")
-	}
-	switch authz {
-	case auth.AuthorizationAuthenticatedUser:
-		uuid, err := auth.GetCurrentUserUUIDFromMetadata(md)
-		if err != nil {
-			return nil, s.internalError(err, "failed to find current user uuid")
+	_, _, err := getAuth(ctx)
+	// if err != nil {
+	// 	return nil, s.internalError(err, "Failed to authorize")
+	// }
+	// switch authz {
+	// case auth.AuthorizationAuthenticatedUser:
+	// 	uuid, err := auth.GetCurrentUserUUIDFromMetadata(md)
+	// 	if err != nil {
+	// 		return nil, s.internalError(err, "failed to find current user uuid")
 
-		}
-		if uuid != req.Uuid {
-			return nil, grpc.Errorf(codes.PermissionDenied, "You do not have access to this service")
-		}
-	case auth.AuthorizationSupportUser:
-	default:
-		return nil, grpc.Errorf(codes.PermissionDenied, "You do not have access to this service")
-	}
+	// 	}
+	// 	if uuid != req.Uuid {
+	// 		return nil, grpc.Errorf(codes.PermissionDenied, "You do not have access to this service")
+	// 	}
+	// case auth.AuthorizationSupportUser:
+	// default:
+	// 	return nil, grpc.Errorf(codes.PermissionDenied, "You do not have access to this service")
+	// }
 
 	newEmail := strings.TrimSpace(strings.ToLower(req.Email))
 	if len(req.Uuid) == 0 {
@@ -591,7 +549,7 @@ func (s *accountServer) RequestEmailChange(ctx context.Context, req *pb.EmailCha
 		Subject:  "Confirm Your New Email Address",
 		HtmlBody: fmt.Sprintf(confirmEmailTmpl, a.Name, link.String(), link.String(), link.String()),
 	}
-	mailer, close, err := email.NewClient()
+	mailer, close, err := email.NewClient(ServiceName)
 	if err != nil {
 		return nil, s.internalError(err, "unable to initiate email service connection")
 	}
@@ -606,16 +564,16 @@ func (s *accountServer) RequestEmailChange(ctx context.Context, req *pb.EmailCha
 // ChangeEmail sets an account to active and updates its email. It is
 // used after a user clicks a confirmation link in their email.
 func (s *accountServer) ChangeEmail(ctx context.Context, req *pb.EmailConfirmation) (*empty.Empty, error) {
-	md, authz, err := getAuth(ctx)
-	if err != nil {
-		return nil, s.internalError(err, "Failed to authorize")
-	}
-	switch authz {
-	case auth.AuthorizationWWWService:
-	case auth.AuthorizationSupportUser:
-	default:
-		return nil, grpc.Errorf(codes.PermissionDenied, "You do not have access to this service")
-	}
+	md, _, err := getAuth(ctx)
+	// if err != nil {
+	// 	return nil, s.internalError(err, "Failed to authorize")
+	// }
+	// switch authz {
+	// case auth.AuthorizationWWWService:
+	// case auth.AuthorizationSupportUser:
+	// default:
+	// 	return nil, grpc.Errorf(codes.PermissionDenied, "You do not have access to this service")
+	// }
 	al := newAuditEntry(md, "account", req.Uuid)
 
 	req.Email = strings.TrimSpace(strings.ToLower(req.Email))
@@ -636,7 +594,7 @@ func (s *accountServer) ChangeEmail(ctx context.Context, req *pb.EmailConfirmati
 
 	al.UpdatedContents = req.Email
 	al.Log(logger, "changed email")
-	go helpers.TrackEventFromMetadata(md, "email_updated")
+	go helpers.TrackEventFromMetadata(md, "email_updated", ServiceName)
 
 	return &empty.Empty{}, nil
 }
@@ -678,7 +636,7 @@ func (s *accountServer) SyncUser(ctx context.Context, req *pb.SyncUserRequest) (
 		s.logger.Infof("skipping sync for user %v because no email or phonenumber", u.Uuid)
 	}
 
-	companyClient, close, err := company.NewClient()
+	companyClient, close, err := company.NewClient(ServiceName)
 	if err != nil {
 		return nil, s.internalError(err, "could not create company client")
 	}

@@ -18,21 +18,7 @@ import (
 )
 
 func (s *companyServer) CreateDirectory(ctx context.Context, req *pb.NewDirectoryEntry) (*pb.DirectoryEntry, error) {
-	md, authz, err := getAuth(ctx)
-	if err != nil {
-		return nil, s.internalError(err, "failed to authorize")
-	}
-
-	switch authz {
-	case auth.AuthorizationSupportUser:
-	case auth.AuthorizationAuthenticatedUser:
-		if err = s.PermissionCompanyAdmin(md, req.CompanyUuid); err != nil {
-			return nil, err
-		}
-	case auth.AuthorizationWWWService:
-	default:
-		return nil, grpc.Errorf(codes.PermissionDenied, "you do not have access to this service")
-	}
+	md, _, err := getAuth(ctx)
 
 	if _, err = s.GetCompany(ctx, &pb.GetCompanyRequest{Uuid: req.CompanyUuid}); err != nil {
 		return nil, err
@@ -41,7 +27,7 @@ func (s *companyServer) CreateDirectory(ctx context.Context, req *pb.NewDirector
 	newCtx, cancel := context.WithCancel(metadata.NewOutgoingContext(context.Background(), createMd))
 	defer cancel()
 
-	accountClient, close, err := account.NewClient()
+	accountClient, close, err := account.NewClient(ServiceName)
 	if err != nil {
 		return nil, s.internalError(err, "unable to initiate account connection")
 	}
@@ -73,7 +59,7 @@ func (s *companyServer) CreateDirectory(ctx context.Context, req *pb.NewDirector
 	al.Log(logger, "updated directory")
 
 	go func() {
-		botClient, close, err := bot.NewClient()
+		botClient, close, err := bot.NewClient(ServiceName)
 		if err != nil {
 			s.internalError(err, "unable to initiate bot connection")
 			return
@@ -84,26 +70,14 @@ func (s *companyServer) CreateDirectory(ctx context.Context, req *pb.NewDirector
 		}
 	}()
 
-	go helpers.TrackEventFromMetadata(md, "directoryentry_created")
+	go helpers.TrackEventFromMetadata(md, "directoryentry_created", ServiceName)
 
 	return d, nil
 }
 
 func (s *companyServer) Directory(ctx context.Context, req *pb.DirectoryListRequest) (*pb.DirectoryList, error) {
-	md, authz, err := getAuth(ctx)
-	if err != nil {
-		return nil, s.internalError(err, "Failed to authorize")
-	}
+	_, _, err := getAuth(ctx)
 
-	switch authz {
-	case auth.AuthorizationAuthenticatedUser:
-		if err = s.PermissionCompanyAdmin(md, req.CompanyUuid); err != nil {
-			return nil, err
-		}
-	case auth.AuthorizationSupportUser:
-	default:
-		return nil, grpc.Errorf(codes.PermissionDenied, "You do not have access to this service")
-	}
 
 	if req.Limit <= 0 {
 		req.Limit = 20
@@ -127,7 +101,7 @@ func (s *companyServer) Directory(ctx context.Context, req *pb.DirectoryListRequ
 		newCtx, cancel := context.WithCancel(metadata.NewOutgoingContext(context.Background(), md))
 		defer cancel()
 
-		accountClient, close, err := account.NewClient()
+		accountClient, close, err := account.NewClient(ServiceName)
 		if err != nil {
 			return nil, s.internalError(err, "unable to initiate account connection")
 		}
@@ -144,29 +118,8 @@ func (s *companyServer) Directory(ctx context.Context, req *pb.DirectoryListRequ
 }
 
 func (s *companyServer) GetDirectoryEntry(ctx context.Context, req *pb.DirectoryEntryRequest) (*pb.DirectoryEntry, error) {
-	md, authz, err := getAuth(ctx)
-	if err != nil {
-		return nil, s.internalError(err, "Failed to authorize")
-	}
+	_, _, err := getAuth(ctx)
 
-	switch authz {
-	case auth.AuthorizationAuthenticatedUser:
-		userUUID, err := auth.GetCurrentUserUUIDFromMetadata(md)
-		if err != nil {
-			return nil, s.internalError(err, "failed to find current user uuid")
-		}
-		// user can access their own entry
-		if userUUID != req.UserUuid {
-			if err = s.PermissionCompanyAdmin(md, req.CompanyUuid); err != nil {
-				return nil, err
-			}
-		}
-	case auth.AuthorizationSupportUser:
-	case auth.AuthorizationWhoamiService:
-	case auth.AuthorizationWWWService:
-	default:
-		return nil, grpc.Errorf(codes.PermissionDenied, "You do not have access to this service")
-	}
 
 	e := &pb.DirectoryEntry{UserUuid: req.UserUuid, CompanyUuid: req.CompanyUuid}
 	err = s.db.QueryRow("SELECT internal_id from directory WHERE (company_uuid=? AND user_uuid=?) LIMIT 1", req.CompanyUuid, req.UserUuid).Scan(&e.InternalId)
@@ -180,7 +133,7 @@ func (s *companyServer) GetDirectoryEntry(ctx context.Context, req *pb.Directory
 	newCtx, cancel := context.WithCancel(metadata.NewOutgoingContext(context.Background(), newMD))
 	defer cancel()
 
-	accountClient, close, err := account.NewClient()
+	accountClient, close, err := account.NewClient(ServiceName)
 	if err != nil {
 		return nil, s.internalError(err, "unable to initiate account connection")
 	}
@@ -195,16 +148,7 @@ func (s *companyServer) GetDirectoryEntry(ctx context.Context, req *pb.Directory
 }
 
 func (s *companyServer) UpdateDirectoryEntry(ctx context.Context, req *pb.DirectoryEntry) (*pb.DirectoryEntry, error) {
-	md, authz, err := getAuth(ctx)
-	switch authz {
-	case auth.AuthorizationAuthenticatedUser:
-		if err = s.PermissionCompanyAdmin(md, req.CompanyUuid); err != nil {
-			return nil, err
-		}
-	case auth.AuthorizationSupportUser:
-	default:
-		return nil, grpc.Errorf(codes.PermissionDenied, "You do not have access to this service")
-	}
+	md, _, err := getAuth(ctx)
 
 	orig, err := s.GetDirectoryEntry(ctx, &pb.DirectoryEntryRequest{CompanyUuid: req.CompanyUuid, UserUuid: req.UserUuid})
 	if err != nil {
@@ -215,7 +159,7 @@ func (s *companyServer) UpdateDirectoryEntry(ctx context.Context, req *pb.Direct
 	newCtx, cancel := context.WithCancel(metadata.NewOutgoingContext(context.Background(), authMd))
 	defer cancel()
 
-	accountClient, close, err := account.NewClient()
+	accountClient, close, err := account.NewClient(ServiceName)
 	if err != nil {
 		return nil, s.internalError(err, "unable to initiate account connection")
 	}
@@ -262,7 +206,7 @@ func (s *companyServer) UpdateDirectoryEntry(ctx context.Context, req *pb.Direct
 
 	go func() {
 		if !req.ConfirmedAndActive && ((orig.Phonenumber != req.Phonenumber) || (req.Phonenumber == "" && orig.Email != req.Email)) {
-			botClient, close, err := bot.NewClient()
+			botClient, close, err := bot.NewClient(ServiceName)
 			if err != nil {
 				s.internalError(err, "unable to initiate bot connection")
 				return
@@ -274,13 +218,12 @@ func (s *companyServer) UpdateDirectoryEntry(ctx context.Context, req *pb.Direct
 			}
 		}
 	}()
-	go helpers.TrackEventFromMetadata(md, "directoryentry_updated")
+	go helpers.TrackEventFromMetadata(md, "directoryentry_updated", ServiceName)
 
 	return req, nil
 }
 
 func (s *companyServer) GetAssociations(ctx context.Context, req *pb.DirectoryListRequest) (*pb.AssociationList, error) {
-	// this handles permissions
 	d, err := s.Directory(ctx, req)
 	if err != nil {
 		return nil, err
